@@ -1,0 +1,13 @@
+Flask
+requests
+pytesseract
+pandas
+python-dotenv
+pdf2image
+Pillow
+certifi
+PyMuPDF
+openpyxl
+gunicorn
+PyPDF2
+flask-cors
