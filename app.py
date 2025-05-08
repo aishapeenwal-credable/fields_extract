@@ -4,20 +4,19 @@ import pandas as pd
 import pytesseract
 import certifi
 import json
+import io
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pdf2image import convert_from_bytes
+from PyPDF2 import PdfReader
 from PIL import Image
 from dotenv import load_dotenv
 import requests
-import json
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
-
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
@@ -88,19 +87,39 @@ parameter_categories = {
 
 def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
+    
     if ext == "pdf":
         with open(file_path, 'rb') as f:
-            images = convert_from_bytes(f.read())
-        return "\n".join(pytesseract.image_to_string(img) for img in images)
+            pdf_bytes = f.read()
+        
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+
+        extracted_text = []
+
+        for page_num in range(1, total_pages + 1):
+            images = convert_from_bytes(
+                pdf_bytes, dpi=100, first_page=page_num, last_page=page_num
+            )
+            for img in images:
+                text = pytesseract.image_to_string(img)
+                extracted_text.append(text)
+                del img  # free memory
+
+        return "\n".join(extracted_text)
+
     elif ext in ["xlsx", "xls"]:
         df = pd.read_excel(file_path)
         return df.to_string(index=False)
+
     elif ext in ["jpg", "jpeg", "png"]:
         image = Image.open(file_path)
         return pytesseract.image_to_string(image)
+
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
+
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
@@ -174,11 +193,15 @@ def extract_fields():
             raw_text = extract_text(tmp.name)
             prompt = build_prompt(raw_text)
             llm_output = query_together(prompt)
-            return jsonify({"extracted_fields": llm_output})
+            try:
+                parsed = json.loads(llm_output)
+            except json.JSONDecodeError:
+                parsed = llm_output
+            return jsonify({"extracted_fields": parsed})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
         finally:
             os.unlink(tmp.name)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, threaded=True)
