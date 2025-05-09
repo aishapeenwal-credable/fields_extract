@@ -19,7 +19,7 @@ CORS(app, origins=[
 ])
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
-TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free")
 
 from parameter_config import parameter_categories
 
