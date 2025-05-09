@@ -4,6 +4,10 @@ import pandas as pd
 import certifi
 import json
 import io
+import numpy as np
+import pdfplumber
+import easyocr
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pdf2image import convert_from_bytes
@@ -11,15 +15,14 @@ from PyPDF2 import PdfReader
 from PIL import Image
 from dotenv import load_dotenv
 import requests
-from paddleocr import PaddleOCR
+
+# Initialize EasyOCR once
+reader = easyocr.Reader(['en'], gpu=False)
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
-
-# Initialize PaddleOCR
-ocr_engine = PaddleOCR(use_angle_cls=True, lang='en')
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
@@ -93,33 +96,32 @@ def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
 
     if ext == "pdf":
+        try:
+            # Try fast text extraction for text PDFs
+            with pdfplumber.open(file_path) as pdf:
+                text = "\n".join([page.extract_text() or '' for page in pdf.pages])
+            if len(text.strip()) >= 100:
+                return text
+        except:
+            pass  # fallback to OCR
+
+        # If scanned or failed, fallback to EasyOCR
         with open(file_path, 'rb') as f:
             pdf_bytes = f.read()
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        total_pages = len(reader.pages)
+        images = convert_from_bytes(pdf_bytes, dpi=100)
+        extracted = []
+        for img in images:
+            result = reader.readtext(np.array(img), detail=0)
+            extracted.append("\n".join(result))
+        return "\n".join(extracted)
 
-        extracted_text = []
-
-        for page_num in range(1, total_pages + 1):
-            images = convert_from_bytes(pdf_bytes, dpi=100, first_page=page_num, last_page=page_num)
-            for img in images:
-                tmp_img_path = f"{file_path}_page{page_num}.png"
-                img.save(tmp_img_path)
-                result = ocr_engine.ocr(tmp_img_path, cls=True)
-                text = "\n".join([line[1][0] for line in result[0]])
-                extracted_text.append(text)
-                os.remove(tmp_img_path)
-                del img
-
-        return "\n".join(extracted_text)
+    elif ext in ["jpg", "jpeg", "png"]:
+        result = reader.readtext(file_path, detail=0)
+        return "\n".join(result)
 
     elif ext in ["xlsx", "xls"]:
         df = pd.read_excel(file_path)
         return df.to_string(index=False)
-
-    elif ext in ["jpg", "jpeg", "png"]:
-        result = ocr_engine.ocr(file_path, cls=True)
-        return "\n".join([line[1][0] for line in result[0]])
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
