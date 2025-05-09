@@ -12,7 +12,8 @@ from pdfminer.high_level import extract_text as pdfminer_extract_text
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
+CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so",
+                                        "https://preview--agreement-navigator-portal.lovable.app",]}})
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
