@@ -1,12 +1,12 @@
 import os
 import tempfile
-import pandas as pd
 import certifi
 import json
 import io
 import numpy as np
 import pdfplumber
 import easyocr
+import pandas as pd
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -16,7 +16,7 @@ from PIL import Image
 from dotenv import load_dotenv
 import requests
 
-# Initialize EasyOCR once
+# Initialize EasyOCR reader only once
 reader = easyocr.Reader(['en'], gpu=False)
 
 load_dotenv()
@@ -27,97 +27,40 @@ CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
-parameter_categories = {
-    "Borrower Details": {
-        "Name of the Borrower (Legal Name)": "The official legal name of the entity taking the loan.",
-        "Constitution": "The type of legal entity (e.g., Pvt Ltd, LLP, Partnership).",
-        "CIN": "Corporate Identification Number of the borrowing entity.",
-        "PAN": "Permanent Account Number of the borrower.",
-        "Registered Address": "Official address registered with authorities.",
-        "Name of the Director": "Full name of the director involved.",
-        "Address of the Director": "Residential address of the director."
-    },
-    "Sanction Details": {
-        "Facility / Loan Amount": "Total sanctioned loan or facility amount.",
-        "Facility Agreement Date": "Date on which the facility agreement was executed.",
-        "Interest": "Applicable interest rate on the loan.",
-        "Tenor": "Duration or term of the facility.",
-        "Cure Period": "Time provided to rectify a default before action.",
-        "Default Charges": "Penalties for default on repayment.",
-        "Maximum disbursement": "Upper cap of loan that can be disbursed.",
-        "Validity": "Period for which the sanction letter or offer is valid.",
-        "Platform Service Fee": "Fee charged by the platform managing the loan.",
-        "Transaction Fee": "Fee for processing the loan transaction.",
-        "Minimum Utilisation": "Minimum amount of facility that must be used.",
-        "Pari-pasu applicable (Yes or no)": "Whether the lender shares rights equally with others.",
-        "FLDG (applicable Yes or no)": "First Loss Default Guarantee applicability.",
-        "Conditions Precedent": "Conditions that must be fulfilled before disbursement.",
-        "Conditions Subsequent": "Conditions to be fulfilled after disbursement.",
-        "Finance Documents": "All legal documents related to the financing."
-    },
-    "Individual Guarantor Details": {
-        "Individual Name": "Full name of the individual guarantor.",
-        "Age of Indivudual Guarantor": "Age of the individual providing the guarantee.",
-        "Age of the guarantor": "Duplicate of the above (keep consistent).",
-        "Guarantor’s PAN": "Permanent Account Number of the guarantor.",
-        "Guarantor’s father’s name": "Father’s name of the individual guarantor.",
-        "Father’s Name": "Same as above (duplicate label).",
-        "Residential Address": "Guarantor’s home address.",
-        "Contact details (name, email, phone) of both parties": "Contact details for borrower and lender representatives.",
-        "Guarantor Name": "Name of the individual guarantor."
-    },
-    "Corporate Guarantor Details": {
-        "Guaranteed %": "Percentage of the loan amount guaranteed.",
-        "Email ID of Guarantor": "Email address of the corporate guarantor.",
-        "CIN": "Corporate Identification Number of the corporate guarantor.",
-        "Business Address": "Business address of the corporate guarantor."
-    },
-    "Notice details of the Lender": {
-        "Name (Attention)": "Mr. Ketan Mehta",
-        "Address": "5th Floor, Satyam Tower, Off Govandi Station Road, Deonar, Mumbai-400088",
-        "Email": "finance2@credable.in",
-        "Contact number": "022-49266964 / 49266900"
-    },
-    "Notice details of the Borrower": {
-        "Name (Attention)": "Contact person at the borrower’s end.",
-        "Address": "Mailing address for borrower legal notices.",
-        "Email": "Email address for borrower notices.",
-        "Contact number": "Phone number for borrower notices."
-    },
-    "Authorised Signatory Details": {
-        "Name": "Name of the person authorized to sign.",
-        "PAN (Image)": "PAN card image of the authorized signatory.",
-        "AADHAR (image)": "Aadhaar card image of the authorized signatory."
-    }
-}
-
+# Load only when needed (to reduce memory in hot paths)
+from parameter_config import parameter_categories  # Move this dict to a separate .py file
 
 def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
 
     if ext == "pdf":
         try:
-            # Try fast text extraction for text PDFs
             with pdfplumber.open(file_path) as pdf:
-                text = "\n".join([page.extract_text() or '' for page in pdf.pages])
-            if len(text.strip()) >= 100:
-                return text
-        except:
-            pass  # fallback to OCR
+                extracted_text = []
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text.append(page_text.strip())
+            full_text = "\n".join(extracted_text)
+            if len(full_text.strip()) > 100:
+                return full_text
+        except Exception as e:
+            print(f"Text-based PDF read failed: {e}")
 
-        # If scanned or failed, fallback to EasyOCR
+        # If pdfplumber fails, fallback to OCR with lower DPI
         with open(file_path, 'rb') as f:
             pdf_bytes = f.read()
-        images = convert_from_bytes(pdf_bytes, dpi=100)
+        images = convert_from_bytes(pdf_bytes, dpi=72)
         extracted = []
         for img in images:
-            result = reader.readtext(np.array(img), detail=0)
-            extracted.append("\n".join(result))
+            np_img = np.array(img)
+            text_lines = reader.readtext(np_img, detail=0)
+            extracted.append("\n".join(text_lines))
         return "\n".join(extracted)
 
     elif ext in ["jpg", "jpeg", "png"]:
-        result = reader.readtext(file_path, detail=0)
-        return "\n".join(result)
+        text_lines = reader.readtext(file_path, detail=0)
+        return "\n".join(text_lines)
 
     elif ext in ["xlsx", "xls"]:
         df = pd.read_excel(file_path)
@@ -132,8 +75,10 @@ def extract_text(file_path):
 
 
 def build_prompt(text):
+    # Truncate if necessary to avoid long prompts
+    text = text[:8000]
     prompt = f"""
-You are an agreement extraction assistant. Given the following document text, extract the required parameters under each category. For each parameter, return a JSON object with its category, parameter name, and value. If the parameter is not found, return null.
+You are an agreement extraction assistant. Given the following document text, extract the required parameters under each category. For each parameter, return a JSON object with its category, parameter name, and value. If not found, return null.
 
 Document content:
 {text}
@@ -171,6 +116,7 @@ def query_together(prompt):
         "temperature": 0.3,
         "max_tokens": 2048
     }
+
     try:
         response = requests.post(
             url,
@@ -197,21 +143,29 @@ def extract_fields():
     if file.filename == "":
         return jsonify({"error": "Filename is empty"}), 400
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
-        file.save(tmp.name)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
+            file.save(tmp.name)
+            tmp_path = tmp.name
+
+        raw_text = extract_text(tmp_path)
+        prompt = build_prompt(raw_text)
+        llm_output = query_together(prompt)
+
         try:
-            raw_text = extract_text(tmp.name)
-            prompt = build_prompt(raw_text)
-            llm_output = query_together(prompt)
-            try:
-                parsed = json.loads(llm_output)
-            except json.JSONDecodeError:
-                parsed = llm_output
-            return jsonify({"extracted_fields": parsed})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
-        finally:
-            os.unlink(tmp.name)
+            parsed = json.loads(llm_output)
+        except json.JSONDecodeError:
+            parsed = {"llm_raw": llm_output}
+
+        return jsonify({"extracted_fields": parsed})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 if __name__ == "__main__":
