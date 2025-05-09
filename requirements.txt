@@ -1,10 +1,8 @@
-flask
-flask_cors
-easyocr
-pdfplumber
-PyPDF2
-openpyxl
-certifi
-python-dotenv
-requests
 gunicorn
+Flask==2.3.3
+flask-cors==4.0.0
+requests==2.31.0
+pdfplumber==0.10.2
+PyPDF2==3.0.1
+certifi==2023.11.17
+python-dotenv==1.0.1
