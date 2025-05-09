@@ -6,3 +6,6 @@ pdfminer.six
 PyPDF2==3.0.1
 certifi==2023.11.17
 python-dotenv==1.0.1
+easyocr
+pdf2image
+Pillow
