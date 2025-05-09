@@ -2,13 +2,9 @@ flask
 flask_cors
 easyocr
 pdfplumber
-pdf2image
 PyPDF2
-Pillow
 openpyxl
 certifi
 python-dotenv
 requests
-numpy
 gunicorn
-pandas
