@@ -6,7 +6,7 @@ services:
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: TOGETHER_API_KEY
-        value: your_api_key_here
+        value: tgp_v1_zApNURcFshGFTG4rACzEL4nd81JXv03Upy6vvqOLfaQ
       - key: TOGETHER_LLM_MODEL
         value: meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
     plan: free  # or starter/standard if you need more RAM
