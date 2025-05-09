@@ -1,7 +1,6 @@
 import os
 import tempfile
 import pandas as pd
-import pytesseract
 import certifi
 import json
 import io
@@ -12,11 +11,15 @@ from PyPDF2 import PdfReader
 from PIL import Image
 from dotenv import load_dotenv
 import requests
+from paddleocr import PaddleOCR
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
+
+# Initialize PaddleOCR
+ocr_engine = PaddleOCR(use_angle_cls=True, lang='en')
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
@@ -85,26 +88,28 @@ parameter_categories = {
     }
 }
 
+
 def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
-    
+
     if ext == "pdf":
         with open(file_path, 'rb') as f:
             pdf_bytes = f.read()
-        
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
 
         extracted_text = []
 
         for page_num in range(1, total_pages + 1):
-            images = convert_from_bytes(
-                pdf_bytes, dpi=100, first_page=page_num, last_page=page_num
-            )
+            images = convert_from_bytes(pdf_bytes, dpi=100, first_page=page_num, last_page=page_num)
             for img in images:
-                text = pytesseract.image_to_string(img)
+                tmp_img_path = f"{file_path}_page{page_num}.png"
+                img.save(tmp_img_path)
+                result = ocr_engine.ocr(tmp_img_path, cls=True)
+                text = "\n".join([line[1][0] for line in result[0]])
                 extracted_text.append(text)
-                del img  # free memory
+                os.remove(tmp_img_path)
+                del img
 
         return "\n".join(extracted_text)
 
@@ -113,8 +118,8 @@ def extract_text(file_path):
         return df.to_string(index=False)
 
     elif ext in ["jpg", "jpeg", "png"]:
-        image = Image.open(file_path)
-        return pytesseract.image_to_string(image)
+        result = ocr_engine.ocr(file_path, cls=True)
+        return "\n".join([line[1][0] for line in result[0]])
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
@@ -122,6 +127,7 @@ def extract_text(file_path):
 
     else:
         raise ValueError(f"Unsupported file format: {ext}")
+
 
 def build_prompt(text):
     prompt = f"""
@@ -146,6 +152,7 @@ Return JSON in the following format:
 ]
 """
     return prompt
+
 
 def query_together(prompt):
     url = "https://api.together.xyz/v1/chat/completions"
@@ -178,6 +185,7 @@ def query_together(prompt):
             "reason": f"LLM error: {str(e)}"
         })
 
+
 @app.route("/extract-fields", methods=["POST"])
 def extract_fields():
     if "file" not in request.files:
@@ -202,6 +210,7 @@ def extract_fields():
             return jsonify({"error": str(e)}), 500
         finally:
             os.unlink(tmp.name)
+
 
 if __name__ == "__main__":
     app.run(debug=True, threaded=True)
