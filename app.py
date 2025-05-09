@@ -21,9 +21,7 @@ CORS(app, origins=[
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
-# Load parameters from external config
 from parameter_config import parameter_categories
-
 
 def extract_text(file_path, max_chars=8000):
     ext = file_path.lower().split('.')[-1]
@@ -31,9 +29,17 @@ def extract_text(file_path, max_chars=8000):
     if ext == "pdf":
         try:
             text = pdfminer_extract_text(file_path)
+            if not text or len(text.strip()) < 100:
+                from pdf2image import convert_from_path
+                import easyocr
+
+                reader = easyocr.Reader(['en'], gpu=False)
+                images = convert_from_path(file_path)
+                ocr_text = "\n".join([reader.readtext(img, detail=0, paragraph=True)[0] for img in images])
+                return ocr_text[:max_chars]
             return text[:max_chars]
         except Exception as e:
-            raise ValueError(f"Failed to extract from PDF using pdfminer: {str(e)}")
+            raise ValueError(f"PDF extraction failed: {str(e)}")
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
@@ -41,7 +47,6 @@ def extract_text(file_path, max_chars=8000):
 
     else:
         raise ValueError(f"Unsupported file format: {ext}")
-
 
 def build_prompt(text):
     prompt = f"""
@@ -67,6 +72,10 @@ Return JSON in the following format:
 """
     return prompt
 
+def clean_llm_output(raw_output):
+    import re
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_output, re.DOTALL)
+    return match.group(1).strip() if match else raw_output.strip()
 
 def query_together(prompt):
     url = "https://api.together.xyz/v1/chat/completions"
@@ -100,7 +109,6 @@ def query_together(prompt):
             "llm_output": None
         })
 
-
 @app.route("/extract-fields", methods=["POST"])
 def extract_fields():
     if "file" not in request.files:
@@ -119,9 +127,10 @@ def extract_fields():
         raw_text = extract_text(tmp_path)
         prompt = build_prompt(raw_text)
         llm_output = query_together(prompt)
+        cleaned_output = clean_llm_output(llm_output)
 
         try:
-            parsed = json.loads(llm_output)
+            parsed = json.loads(cleaned_output)
         except json.JSONDecodeError:
             parsed = {
                 "llm_raw": llm_output,
@@ -137,11 +146,9 @@ def extract_fields():
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({"status": "ok"}), 200
-
 
 if __name__ == "__main__":
     app.run(debug=True, threaded=True)
