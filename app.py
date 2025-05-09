@@ -45,6 +45,15 @@ def extract_text(file_path, max_chars=8000):
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()[:max_chars]
 
+    elif ext in ["doc", "docx"]:
+        import docx2txt
+        return docx2txt.process(file_path)[:max_chars]
+
+    elif ext in ["xls", "xlsx"]:
+        import pandas as pd
+        df = pd.read_excel(file_path, dtype=str)
+        return df.to_string(index=False)[:max_chars]
+
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
@@ -111,40 +120,45 @@ def query_together(prompt):
 
 @app.route("/extract-fields", methods=["POST"])
 def extract_fields():
-    if "file" not in request.files:
-        return jsonify({"error": "File not provided"}), 400
+    files = request.files.getlist("file")
+    if not files:
+        return jsonify({"error": "No files provided"}), 400
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "Filename is empty"}), 400
+    results = []
 
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
-            file.save(tmp.name)
-            tmp_path = tmp.name
+    for file in files:
+        if file.filename == "":
+            continue
 
-        raw_text = extract_text(tmp_path)
-        prompt = build_prompt(raw_text)
-        llm_output = query_together(prompt)
-        cleaned_output = clean_llm_output(llm_output)
-
+        tmp_path = None
         try:
-            parsed = json.loads(cleaned_output)
-        except json.JSONDecodeError:
-            parsed = {
-                "llm_raw": llm_output,
-                "error": "Invalid JSON from LLM"
-            }
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
+                file.save(tmp.name)
+                tmp_path = tmp.name
 
-        return jsonify({"extracted_fields": parsed})
+            raw_text = extract_text(tmp_path)
+            prompt = build_prompt(raw_text)
+            llm_output = query_together(prompt)
+            cleaned_output = clean_llm_output(llm_output)
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            try:
+                parsed = json.loads(cleaned_output)
+            except json.JSONDecodeError:
+                parsed = {
+                    "llm_raw": llm_output,
+                    "error": "Invalid JSON from LLM"
+                }
 
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            results.append({"filename": file.filename, "extracted_fields": parsed})
+
+        except Exception as e:
+            results.append({"filename": file.filename, "error": str(e)})
+
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return jsonify(results)
 
 @app.route("/", methods=["GET"])
 def health_check():
