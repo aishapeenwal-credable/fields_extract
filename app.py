@@ -13,7 +13,7 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so",
-                                        "https://preview--agreement-navigator-portal.lovable.app",]}})
+                                        "https://preview--agreement-navigator-portal.lovable.app",""https://preview-31310e4f--agreement-navigator-portal.lovable.app"]}})
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
