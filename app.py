@@ -12,8 +12,11 @@ from pdfminer.high_level import extract_text as pdfminer_extract_text
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so",
-                                        "https://preview--agreement-navigator-portal.lovable.app","https://preview-31310e4f--agreement-navigator-portal.lovable.app"]}})
+CORS(app, origins=[
+    "https://preview-31310e4f--agreement-navigator-portal.lovable.app",
+    "https://preview--agreement-navigator-portal.lovable.app",
+    "http://localhost:3000"
+])
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
@@ -28,7 +31,7 @@ def extract_text(file_path, max_chars=8000):
     if ext == "pdf":
         try:
             text = pdfminer_extract_text(file_path)
-            return text[:max_chars]  # truncate to reduce LLM load
+            return text[:max_chars]
         except Exception as e:
             raise ValueError(f"Failed to extract from PDF using pdfminer: {str(e)}")
 
@@ -86,15 +89,15 @@ def query_together(prompt):
             url,
             headers=headers,
             json=body,
-            verify=certifi.where()
+            verify=certifi.where(),
+            timeout=30
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return json.dumps({
-            "document_type": "Unknown",
-            "confidence": 0.0,
-            "reason": f"LLM error: {str(e)}"
+            "error": f"LLM error: {str(e)}",
+            "llm_output": None
         })
 
 
@@ -120,7 +123,10 @@ def extract_fields():
         try:
             parsed = json.loads(llm_output)
         except json.JSONDecodeError:
-            parsed = {"llm_raw": llm_output}
+            parsed = {
+                "llm_raw": llm_output,
+                "error": "Invalid JSON from LLM"
+            }
 
         return jsonify({"extracted_fields": parsed})
 
@@ -130,6 +136,11 @@ def extract_fields():
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok"}), 200
 
 
 if __name__ == "__main__":
