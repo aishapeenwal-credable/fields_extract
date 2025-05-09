@@ -2,23 +2,13 @@ import os
 import tempfile
 import certifi
 import json
-import io
-import numpy as np
 import pdfplumber
-import easyocr
-import pandas as pd
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pdf2image import convert_from_bytes
-from PyPDF2 import PdfReader
-from PIL import Image
 from dotenv import load_dotenv
 import requests
 
-# Initialize EasyOCR reader only once
-reader = easyocr.Reader(['en'], gpu=False)
-
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
@@ -27,8 +17,9 @@ CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
-# Load only when needed (to reduce memory in hot paths)
-from parameter_config import parameter_categories  # Move this dict to a separate .py file
+# Load parameters from external config
+from parameter_config import parameter_categories
+
 
 def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
@@ -41,30 +32,9 @@ def extract_text(file_path):
                     page_text = page.extract_text()
                     if page_text:
                         extracted_text.append(page_text.strip())
-            full_text = "\n".join(extracted_text)
-            if len(full_text.strip()) > 100:
-                return full_text
+            return "\n".join(extracted_text)
         except Exception as e:
-            print(f"Text-based PDF read failed: {e}")
-
-        # If pdfplumber fails, fallback to OCR with lower DPI
-        with open(file_path, 'rb') as f:
-            pdf_bytes = f.read()
-        images = convert_from_bytes(pdf_bytes, dpi=72)
-        extracted = []
-        for img in images:
-            np_img = np.array(img)
-            text_lines = reader.readtext(np_img, detail=0)
-            extracted.append("\n".join(text_lines))
-        return "\n".join(extracted)
-
-    elif ext in ["jpg", "jpeg", "png"]:
-        text_lines = reader.readtext(file_path, detail=0)
-        return "\n".join(text_lines)
-
-    elif ext in ["xlsx", "xls"]:
-        df = pd.read_excel(file_path)
-        return df.to_string(index=False)
+            raise ValueError(f"Failed to extract from PDF: {str(e)}")
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
@@ -75,8 +45,7 @@ def extract_text(file_path):
 
 
 def build_prompt(text):
-    # Truncate if necessary to avoid long prompts
-    text = text[:8000]
+    text = text[:8000]  # truncate to stay within LLM token limits
     prompt = f"""
 You are an agreement extraction assistant. Given the following document text, extract the required parameters under each category. For each parameter, return a JSON object with its category, parameter name, and value. If not found, return null.
 
