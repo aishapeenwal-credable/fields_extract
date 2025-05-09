@@ -1,10 +1,7 @@
-pandas
-PyMuPDF
-gunicorn
 flask
 flask_cors
-paddleocr
-paddlepaddle==2.5.2
+easyocr
+pdfplumber
 pdf2image
 PyPDF2
 Pillow
@@ -12,3 +9,5 @@ openpyxl
 certifi
 python-dotenv
 requests
+numpy
+gunicorn
