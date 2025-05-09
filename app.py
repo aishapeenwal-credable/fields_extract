@@ -2,11 +2,11 @@ import os
 import tempfile
 import certifi
 import json
-import pdfplumber
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import requests
+from pdfminer.high_level import extract_text as pdfminer_extract_text
 
 # Load environment variables
 load_dotenv()
@@ -21,31 +21,25 @@ TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-I
 from parameter_config import parameter_categories
 
 
-def extract_text(file_path):
+def extract_text(file_path, max_chars=8000):
     ext = file_path.lower().split('.')[-1]
 
     if ext == "pdf":
         try:
-            with pdfplumber.open(file_path) as pdf:
-                extracted_text = []
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted_text.append(page_text.strip())
-            return "\n".join(extracted_text)
+            text = pdfminer_extract_text(file_path)
+            return text[:max_chars]  # truncate to reduce LLM load
         except Exception as e:
-            raise ValueError(f"Failed to extract from PDF: {str(e)}")
+            raise ValueError(f"Failed to extract from PDF using pdfminer: {str(e)}")
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()
+            return f.read()[:max_chars]
 
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
 
 def build_prompt(text):
-    text = text[:8000]  # truncate to stay within LLM token limits
     prompt = f"""
 You are an agreement extraction assistant. Given the following document text, extract the required parameters under each category. For each parameter, return a JSON object with its category, parameter name, and value. If not found, return null.
 
