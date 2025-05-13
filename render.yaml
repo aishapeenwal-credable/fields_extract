@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: agreement-extractor
-    env: python
-    buildCommand: buildCommand: "./build.sh && pip install -r requirements.txt"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    name: extract-fields-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
     envVars:
       - key: TOGETHER_API_KEY
-        value: tgp_v1_zApNURcFshGFTG4rACzEL4nd81JXv03Upy6vvqOLfaQ
+        sync: false
       - key: TOGETHER_LLM_MODEL
         value: meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
-    plan: free  # or starter/standard if you need more RAM
+    plan: free
