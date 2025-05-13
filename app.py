@@ -2,62 +2,81 @@ import os
 import tempfile
 import certifi
 import json
+import io
+import numpy as np
+import pdfplumber
+import easyocr
+import pandas as pd
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from pdf2image import convert_from_bytes
+from PyPDF2 import PdfReader
+from PIL import Image
 from dotenv import load_dotenv
 import requests
-from pdfminer.high_level import extract_text as pdfminer_extract_text
 
-# Load environment variables
+# Initialize EasyOCR reader only once
+reader = easyocr.Reader(['en'], gpu=False)
+
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=[
-    "https://preview-31310e4f--agreement-navigator-portal.lovable.app",
-    "https://preview--agreement-navigator-portal.lovable.app",
-    "http://localhost:3000"
-])
+CORS(app, resources={r"/*": {"origins": ["*", "https://lovable.so"]}})
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
-TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free")
+TOGETHER_MODEL = os.getenv("TOGETHER_LLM_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
 
-from parameter_config import parameter_categories
+# Load only when needed (to reduce memory in hot paths)
+from parameter_config import parameter_categories  # Move this dict to a separate .py file
 
-def extract_text(file_path, max_chars=8000):
+def extract_text(file_path):
     ext = file_path.lower().split('.')[-1]
 
     if ext == "pdf":
         try:
-            text = pdfminer_extract_text(file_path)
-            if not text or len(text.strip()) < 100:
-                from pdf2image import convert_from_path
-                import easyocr
-
-                reader = easyocr.Reader(['en'], gpu=False)
-                images = convert_from_path(file_path)
-                ocr_text = "\n".join([reader.readtext(img, detail=0, paragraph=True)[0] for img in images])
-                return ocr_text[:max_chars]
-            return text[:max_chars]
+            with pdfplumber.open(file_path) as pdf:
+                extracted_text = []
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text.append(page_text.strip())
+            full_text = "\n".join(extracted_text)
+            if len(full_text.strip()) > 100:
+                return full_text
         except Exception as e:
-            raise ValueError(f"PDF extraction failed: {str(e)}")
+            print(f"Text-based PDF read failed: {e}")
+
+        # If pdfplumber fails, fallback to OCR with lower DPI
+        with open(file_path, 'rb') as f:
+            pdf_bytes = f.read()
+        images = convert_from_bytes(pdf_bytes, dpi=72)
+        extracted = []
+        for img in images:
+            np_img = np.array(img)
+            text_lines = reader.readtext(np_img, detail=0)
+            extracted.append("\n".join(text_lines))
+        return "\n".join(extracted)
+
+    elif ext in ["jpg", "jpeg", "png"]:
+        text_lines = reader.readtext(file_path, detail=0)
+        return "\n".join(text_lines)
+
+    elif ext in ["xlsx", "xls"]:
+        df = pd.read_excel(file_path)
+        return df.to_string(index=False)
 
     elif ext == "txt":
         with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()[:max_chars]
-
-    elif ext in ["doc", "docx"]:
-        import docx2txt
-        return docx2txt.process(file_path)[:max_chars]
-
-    elif ext in ["xls", "xlsx"]:
-        import pandas as pd
-        df = pd.read_excel(file_path, dtype=str)
-        return df.to_string(index=False)[:max_chars]
+            return f.read()
 
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
+
 def build_prompt(text):
+    # Truncate if necessary to avoid long prompts
+    text = text[:8000]
     prompt = f"""
 You are an agreement extraction assistant. Given the following document text, extract the required parameters under each category. For each parameter, return a JSON object with its category, parameter name, and value. If not found, return null.
 
@@ -81,10 +100,6 @@ Return JSON in the following format:
 """
     return prompt
 
-def clean_llm_output(raw_output):
-    import re
-    match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_output, re.DOTALL)
-    return match.group(1).strip() if match else raw_output.strip()
 
 def query_together(prompt):
     url = "https://api.together.xyz/v1/chat/completions"
@@ -107,62 +122,51 @@ def query_together(prompt):
             url,
             headers=headers,
             json=body,
-            verify=certifi.where(),
-            timeout=30
+            verify=certifi.where()
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return json.dumps({
-            "error": f"LLM error: {str(e)}",
-            "llm_output": None
+            "document_type": "Unknown",
+            "confidence": 0.0,
+            "reason": f"LLM error: {str(e)}"
         })
+
 
 @app.route("/extract-fields", methods=["POST"])
 def extract_fields():
-    files = request.files.getlist("file")
-    if not files:
-        return jsonify({"error": "No files provided"}), 400
+    if "file" not in request.files:
+        return jsonify({"error": "File not provided"}), 400
 
-    results = []
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Filename is empty"}), 400
 
-    for file in files:
-        if file.filename == "":
-            continue
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
+            file.save(tmp.name)
+            tmp_path = tmp.name
 
-        tmp_path = None
+        raw_text = extract_text(tmp_path)
+        prompt = build_prompt(raw_text)
+        llm_output = query_together(prompt)
+
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[-1]) as tmp:
-                file.save(tmp.name)
-                tmp_path = tmp.name
+            parsed = json.loads(llm_output)
+        except json.JSONDecodeError:
+            parsed = {"llm_raw": llm_output}
 
-            raw_text = extract_text(tmp_path)
-            prompt = build_prompt(raw_text)
-            llm_output = query_together(prompt)
-            cleaned_output = clean_llm_output(llm_output)
+        return jsonify({"extracted_fields": parsed})
 
-            try:
-                parsed = json.loads(cleaned_output)
-            except json.JSONDecodeError:
-                parsed = {
-                    "llm_raw": llm_output,
-                    "error": "Invalid JSON from LLM"
-                }
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-            results.append({"filename": file.filename, "extracted_fields": parsed})
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
-        except Exception as e:
-            results.append({"filename": file.filename, "error": str(e)})
-
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    return jsonify(results)
-
-@app.route("/", methods=["GET"])
-def health_check():
-    return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
     app.run(debug=True, threaded=True)
