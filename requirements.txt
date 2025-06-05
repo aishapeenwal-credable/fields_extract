@@ -4,3 +4,4 @@ requests
 pdfplumber
 together
 tiktoken
+python-multipart
