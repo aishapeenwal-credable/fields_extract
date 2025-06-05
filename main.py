@@ -57,40 +57,42 @@ together.api_key = os.getenv("TOGETHER_API_KEY")
 # ---------- Schema ----------
 parameter_categories = {
     "Agreement applicability": {
-        "Is Hypothecation mentioned (Y/N)",
-        "Is Cheques or UDC or PDC mentioned? (Y/N)",
-        "Is Personal guarantee mentioned? (Y/N)",
-        "Is Corporate guarantee mentioned? (Y/N)",
-        "Is Undertaking mentioned? (Y/N)"
+        "doc_deed_of_hypothecation",
+        "doc_cover_letter",
+        "doc_deed_of_personal_guarantee",
+        "doc_deed_of_corporate_guarantee",
+        "doc_undertaking"
     },
     "Borrower Details": {
-        "Name of the Borrower (Legal Name)",
-        "Constitution",
-        "CIN",
-        "PAN",
-        "Registered Address",
-        "Name of the Director",
-        "Address of the Director"
+        "borrower_name",
+        "borrower_constitution",
+        "borrower_cin",
+        "borrower_pan",
+        "borrower_registered_address",
+        "director_name",
+        "director_address"
     },
     "Sanction Details": {
-        "Facility / Loan Amount",
+        "facility_amount",
         "facility_amount_in_words",
-        "Facility Agreement Date",
-        "Interest",
-        "Tenor",
-        "Cure Period",
-        "Default Charges",
-        "Maximum disbursement",
-        "Validity",
-        "Platform Service Fee",
-        "Transaction Fee",
-        "Minimum Utilisation",
-        "Pari-pasu applicable",
+        "facility_agreement_date",
+        "interest_rate",
+        "tenor",
+        "cure_period",
+        "default_charges",
+        "maximum_disbursement",
+        "validity",
+        "platform_service_fee",
+        "transaction_fee",
+        "minimum_utilisation",
+        "pari_pasu_applicable",
         "Pari_pasu_charge",
-        "FLDG",
-        "Conditions Precedent",
-        "Conditions Subsequent",
-        "Finance Documents"
+        "fldg_applicable",
+        "conditions_precedent",
+        "conditions_subsequent",
+        "finance_documents",
+        "end_clients",
+        "security"
     }
 }
 
@@ -107,7 +109,7 @@ Below is the text extracted from a PDF credit appraisal note. Extract values ONL
 Ignore irrelevant data. if not identifiable return \"Null\".
 
 Return the output as a list of JSON objects in the format: 
-[{{\"Field\": \"<category>__<field_name>\", \"Value\": \"<value>\"}}]
+[{{\"Field\": \"<field_name>\", \"Value\": \"<value>\"}}]
 
 ### Document Text:
 {text}
