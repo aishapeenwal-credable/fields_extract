@@ -43,7 +43,9 @@ app.add_middleware(
         "https://lovable-ui.vercel.app",
         "https://id-preview--c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
         "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
-        "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovableproject.com"
+        "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovableproject.com",
+        "https://preview--agreement-generation.lovable.app",
+        "https://agreement-generation.lovable.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
