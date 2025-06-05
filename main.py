@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 from fastapi import FastAPI, File, UploadFile, Form
 from typing import List, Optional
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # ---------- Unsafe SSL Adapter ----------
 class UnsafeAdapter(HTTPAdapter):
@@ -31,9 +32,11 @@ requests.put = s.put
 requests.delete = s.delete
 
 # ---------- FastAPI ----------
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
 
-# ---------- CORS for Lovable ----------
+# ---------- CORS Settings ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -41,11 +44,11 @@ app.add_middleware(
         "https://id-preview--c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
         "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
         "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovableproject.com"
-    ],  # replace with actual domain if needed
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
-)
+) 
 
 together.api_key = os.getenv("TOGETHER_API_KEY")
 
