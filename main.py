@@ -32,6 +32,21 @@ requests.delete = s.delete
 
 # ---------- FastAPI ----------
 app = FastAPI()
+
+# ---------- CORS for Lovable ----------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://lovable-ui.vercel.app",
+        "https://id-preview--c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
+        "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovable.app",
+        "https://c7ef1364-e7e3-4010-929a-ace0b3c13062.lovableproject.com"
+    ],  # replace with actual domain if needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
 together.api_key = os.getenv("TOGETHER_API_KEY")
 
 # ---------- Schema ----------
