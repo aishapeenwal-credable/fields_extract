@@ -1,0 +1,243 @@
+import os
+import re
+import ssl
+import json
+import pdfplumber
+import tempfile
+import together
+import requests
+from urllib3.poolmanager import PoolManager
+from requests.adapters import HTTPAdapter
+from fastapi import FastAPI, File, UploadFile, Form
+from typing import List, Optional
+from fastapi.responses import JSONResponse
+
+# ---------- Unsafe SSL Adapter ----------
+class UnsafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+s = requests.Session()
+s.mount("https://", UnsafeAdapter())
+requests.get = s.get
+requests.post = s.post
+requests.request = s.request
+requests.head = s.head
+requests.put = s.put
+requests.delete = s.delete
+
+# ---------- FastAPI ----------
+app = FastAPI()
+together.api_key = os.getenv("TOGETHER_API_KEY")
+
+# ---------- Schema ----------
+parameter_categories = {
+    "Agreement applicability": {
+        "Is Hypothecation mentioned (Y/N)",
+        "Is Cheques or UDC or PDC mentioned? (Y/N)",
+        "Is Personal guarantee mentioned? (Y/N)",
+        "Is Corporate guarantee mentioned? (Y/N)",
+        "Is Undertaking mentioned? (Y/N)"
+    },
+    "Borrower Details": {
+        "Name of the Borrower (Legal Name)",
+        "Constitution",
+        "CIN",
+        "PAN",
+        "Registered Address",
+        "Name of the Director",
+        "Address of the Director"
+    },
+    "Sanction Details": {
+        "Facility / Loan Amount",
+        "facility_amount_in_words",
+        "Facility Agreement Date",
+        "Interest",
+        "Tenor",
+        "Cure Period",
+        "Default Charges",
+        "Maximum disbursement",
+        "Validity",
+        "Platform Service Fee",
+        "Transaction Fee",
+        "Minimum Utilisation",
+        "Pari-pasu applicable",
+        "Pari_pasu_charge",
+        "FLDG",
+        "Conditions Precedent",
+        "Conditions Subsequent",
+        "Finance Documents"
+    }
+}
+
+def build_prompt(text: str) -> str:
+    keys = []
+    for section, fields in parameter_categories.items():
+        for field in fields:
+            keys.append(f"{section}__{field}")
+    schema_fields = "\n".join(f"- {k}" for k in keys)
+
+    return f"""You are an expert assistant extracting structured data from loan sanction documents.
+
+Below is the text extracted from a PDF credit appraisal note. Extract values ONLY for the fields listed in the schema- brief description is given along with the fields- understand what is asked and fetch from the documents.
+Ignore irrelevant data. if not identifiable return \"Null\".
+
+Return the output as a list of JSON objects in the format: 
+[{{\"Field\": \"<category>__<field_name>\", \"Value\": \"<value>\"}}]
+
+### Document Text:
+{text}
+
+### Schema Fields:
+{schema_fields}
+
+### Output JSON:
+"""
+
+def call_together_llm(prompt: str) -> str:
+    import tiktoken
+    encoding = tiktoken.get_encoding("cl100k_base")
+    input_tokens = len(encoding.encode(prompt))
+    max_tokens = max(256, 8192 - input_tokens)
+
+    try:
+        response = together.Complete.create(
+            model="deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free",
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.2,
+            stop=["###"]
+        )
+
+        if "choices" in response and len(response["choices"]) > 0:
+            raw_text = response["choices"][0]["text"].strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[len("```json"):].strip()
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3].strip()
+            return raw_text
+        return "[]"
+
+    except Exception as e:
+        return json.dumps([{"Field": "exception", "Value": str(e)}])
+
+def find_page_and_excerpt(value: str, pages: list) -> tuple:
+    for i, page_text in enumerate(pages):
+        if value and isinstance(value, str) and value.strip().lower() not in {"null", ""}:
+            pattern = re.escape(value.strip()[:20])
+            if re.search(pattern, page_text, flags=re.IGNORECASE):
+                excerpt = page_text[page_text.lower().find(value.lower()[:20]):][:150]
+                return i + 1, excerpt
+    return None, None
+
+def extract_fields_from_pdf_llm(pdf_path: str, source_name: str) -> str:
+    with pdfplumber.open(pdf_path) as pdf:
+        pages_text = [page.extract_text() or "" for page in pdf.pages]
+        full_text = "\n".join(pages_text)
+
+    trimmed_text = full_text[:12000]
+    prompt = build_prompt(trimmed_text)
+    raw_response = call_together_llm(prompt)
+
+    try:
+        json_blocks = re.findall(r"\[\s*{.*?}\s*\]", raw_response, flags=re.DOTALL)
+        merged_items = []
+        for block in json_blocks:
+            try:
+                parsed = json.loads(block)
+                for item in parsed:
+                    val = item.get("Value", "")
+                    page_num, excerpt = find_page_and_excerpt(val, pages_text)
+                    item["SourceDocument"] = source_name
+                    item["PageNumber"] = page_num if page_num else "Unknown"
+                    item["Excerpt"] = excerpt if excerpt else "N/A"
+                merged_items.extend(parsed)
+            except json.JSONDecodeError:
+                continue
+        return json.dumps(merged_items, indent=2)
+
+    except Exception as e:
+        return json.dumps([{
+            "Field": "error",
+            "Value": f"LLM returned malformed JSON: {str(e)}",
+            "SourceDocument": source_name
+        }], indent=2)
+
+def get_section_name(field_name: str) -> str:
+    return field_name.split("__")[0].strip()
+
+@app.post("/extract-fields")
+async def extract_fields(
+    files: List[UploadFile] = File(...),
+    priority: Optional[str] = Form(None)  # just one file
+):
+    def get_priority_index(filename):
+        return 0 if filename == priority else 1
+
+    field_map = {}
+
+    for file in files:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file.file.read())
+            tmp_path = tmp.name
+
+        result_str = extract_fields_from_pdf_llm(tmp_path, source_name=file.filename)
+        result_items = json.loads(result_str)
+
+        for item in result_items:
+            key = item["Field"]
+            section = get_section_name(key)
+            new_entry = {
+                "Value": item["Value"],
+                "SourceDocument": item["SourceDocument"],
+                "PageNumber": item["PageNumber"],
+                "Excerpt": item["Excerpt"],
+                "Priority": get_priority_index(item["SourceDocument"])
+            }
+
+            if key not in field_map:
+                field_map[key] = {
+                    "Field": key,
+                    "Section": section,
+                    "Value": item["Value"],
+                    "SourceDocument": item["SourceDocument"],
+                    "PageNumber": item["PageNumber"],
+                    "Excerpt": item["Excerpt"],
+                    "Priority": new_entry["Priority"],
+                    "AlternateValues": [],
+                    "Conflicting": False
+                }
+            else:
+                existing = field_map[key]
+                if item["Value"] == existing["Value"]:
+                    continue
+                if new_entry["Priority"] < existing["Priority"]:
+                    existing["AlternateValues"].append({
+                        "Value": existing["Value"],
+                        "SourceDocument": existing["SourceDocument"],
+                        "PageNumber": existing["PageNumber"],
+                        "Excerpt": existing["Excerpt"]
+                    })
+                    existing.update({
+                        "Value": item["Value"],
+                        "SourceDocument": item["SourceDocument"],
+                        "PageNumber": item["PageNumber"],
+                        "Excerpt": item["Excerpt"],
+                        "Priority": new_entry["Priority"],
+                        "Conflicting": True
+                    })
+                else:
+                    existing["AlternateValues"].append(new_entry)
+                    existing["Conflicting"] = True
+
+    grouped_output = {}
+    for entry in field_map.values():
+        section = entry.pop("Section")
+        entry.pop("Priority")
+        grouped_output.setdefault(section, []).append(entry)
+
+    return JSONResponse(content=grouped_output)
