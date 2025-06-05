@@ -1,12 +1,9 @@
 services:
   - type: web
-    name: extract-fields-api
+    name: multi-pdf-extractor
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: TOGETHER_API_KEY
         sync: false
-      - key: TOGETHER_LLM_MODEL
-        value: meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
-    plan: free
