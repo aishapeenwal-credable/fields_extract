@@ -32,8 +32,6 @@ requests.put = s.put
 requests.delete = s.delete
 
 # ---------- FastAPI ----------
-from fastapi.middleware.cors import CORSMiddleware
-
 app = FastAPI()
 
 # ---------- CORS Settings ----------
@@ -54,59 +52,29 @@ app.add_middleware(
 
 together.api_key = os.getenv("TOGETHER_API_KEY")
 
-# ---------- Schema ----------
-parameter_categories = {
-    "Agreement applicability": {
-        "doc_deed_of_hypothecation",
-        "doc_cover_letter",
-        "doc_deed_of_personal_guarantee",
-        "doc_deed_of_corporate_guarantee",
-        "doc_undertaking"
-    },
-    "Borrower Details": {
-        "borrower_name",
-        "borrower_constitution",
-        "borrower_cin",
-        "borrower_pan",
-        "borrower_registered_address",
-        "director_name",
-        "director_address"
-    },
-    "Sanction Details": {
-        "facility_amount",
-        "facility_amount_in_words",
-        "facility_agreement_date",
-        "interest_rate",
-        "tenor",
-        "cure_period",
-        "default_charges",
-        "maximum_disbursement",
-        "validity",
-        "platform_service_fee",
-        "transaction_fee",
-        "minimum_utilisation",
-        "pari_pasu_applicable",
-        "Pari_pasu_charge",
-        "fldg_applicable",
-        "conditions_precedent",
-        "conditions_subsequent",
-        "finance_documents",
-        "end_clients",
-        "security"
-    }
-}
+
+together.api_key = os.getenv("TOGETHER_API_KEY")
+
+# --- Keep all your existing imports and unsafe SSL patch code ---
+
+# ---------- FastAPI ----------
+app = FastAPI()
+together.api_key = os.getenv("TOGETHER_API_KEY")
+# ---------- Flat parameter list ----------
+parameter_fields = [
+    "doc_deed_of_hypothecation_applicable(true_or_false)", "doc_cover_letter_applicable(true_or_false)", "doc_deed_of_personal_guarantee_applicable(true_or_false)", "doc_deed_of_corporate_guarantee_applicable(true_or_false)", "doc_undertaking_applicable(true_or_false)",
+    "borrower_name", "borrower_constitution", "borrower_cin", "borrower_pan", "borrower_registered_address", "director_name", "director_address",
+    "facility_amount", "facility_amount_in_words", "interest_rate", "tenor", "cure_period", "default_charges",
+    "maximum_disbursement", "validity", "platform_service_fee", "transaction_fee", "minimum_utilisation", "pari_pasu_applicable(true_or_false)",
+    "Pari_pasu_charge", "fldg_applicable(true_or_false)", "conditions_precedent", "conditions_subsequent", "finance_documents", "end_clients", "security"
+]
 
 def build_prompt(text: str) -> str:
-    keys = []
-    for section, fields in parameter_categories.items():
-        for field in fields:
-            keys.append(f"{section}__{field}")
-    schema_fields = "\n".join(f"- {k}" for k in keys)
-
+    schema_fields = "\n".join(f"- {field}" for field in parameter_fields)
     return f"""You are an expert assistant extracting structured data from loan sanction documents.
 
-Below is the text extracted from a PDF credit appraisal note. Extract values ONLY for the fields listed in the schema- brief description is given along with the fields- understand what is asked and fetch from the documents.
-Ignore irrelevant data. if not identifiable return \"Null\".
+Below is the text extracted from a PDF credit appraisal note. Extract values ONLY for the fields listed in the schema.
+If not identifiable, return \"Null\".
 
 Return the output as a list of JSON objects in the format: 
 [{{\"Field\": \"<field_name>\", \"Value\": \"<value>\"}}]
@@ -189,13 +157,10 @@ def extract_fields_from_pdf_llm(pdf_path: str, source_name: str) -> str:
             "SourceDocument": source_name
         }], indent=2)
 
-def get_section_name(field_name: str) -> str:
-    return field_name.split("__")[0].strip()
-
 @app.post("/extract-fields")
 async def extract_fields(
     files: List[UploadFile] = File(...),
-    priority: Optional[str] = Form(None)  # just one file
+    priority: Optional[str] = Form(None)
 ):
     def get_priority_index(filename):
         return 0 if filename == priority else 1
@@ -212,7 +177,6 @@ async def extract_fields(
 
         for item in result_items:
             key = item["Field"]
-            section = get_section_name(key)
             new_entry = {
                 "Value": item["Value"],
                 "SourceDocument": item["SourceDocument"],
@@ -224,7 +188,6 @@ async def extract_fields(
             if key not in field_map:
                 field_map[key] = {
                     "Field": key,
-                    "Section": section,
                     "Value": item["Value"],
                     "SourceDocument": item["SourceDocument"],
                     "PageNumber": item["PageNumber"],
@@ -256,10 +219,10 @@ async def extract_fields(
                     existing["AlternateValues"].append(new_entry)
                     existing["Conflicting"] = True
 
-    grouped_output = {}
+    output = {}
     for entry in field_map.values():
-        section = entry.pop("Section")
         entry.pop("Priority")
-        grouped_output.setdefault(section, []).append(entry)
+        output[entry["Field"]] = entry
+        entry.pop("Field")
 
-    return JSONResponse(content=grouped_output)
+    return JSONResponse(content=output)
