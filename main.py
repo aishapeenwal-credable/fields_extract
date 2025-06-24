@@ -2,10 +2,12 @@ import os
 import re
 import ssl
 import json
+import time
 import pdfplumber
 import tempfile
 import together
 import requests
+import tiktoken
 from urllib3.poolmanager import PoolManager
 from requests.adapters import HTTPAdapter
 from fastapi import FastAPI, File, UploadFile, Form
@@ -13,7 +15,7 @@ from typing import List, Optional
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# ---------- Unsafe SSL Adapter ----------
+# ---------- SSL Bypass + User-Agent ----------
 class UnsafeAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         ctx = ssl.create_default_context()
@@ -22,19 +24,15 @@ class UnsafeAdapter(HTTPAdapter):
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-s = requests.Session()
-s.mount("https://", UnsafeAdapter())
-requests.get = s.get
-requests.post = s.post
-requests.request = s.request
-requests.head = s.head
-requests.put = s.put
-requests.delete = s.delete
+session = requests.Session()
+session.mount("https://", UnsafeAdapter())
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/113.0.0.0 Safari/537.36"
+})
 
-# ---------- FastAPI ----------
+# ---------- FastAPI Setup ----------
 app = FastAPI()
 
-# ---------- CORS Settings ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -48,53 +46,79 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
-) 
+)
 
+# ---------- Config ----------
 together.api_key = os.getenv("TOGETHER_API_KEY")
 
-
-together.api_key = os.getenv("TOGETHER_API_KEY")
-
-# --- Keep all your existing imports and unsafe SSL patch code ---
-
-# ---------- FastAPI ----------
-app = FastAPI()
-together.api_key = os.getenv("TOGETHER_API_KEY")
-# ---------- Flat parameter list ----------
 parameter_fields = [
-    "doc_deed_of_hypothecation_applicable(true_or_false)", "doc_cover_letter_applicable(true_or_false)", "doc_deed_of_personal_guarantee_applicable(true_or_false)", "doc_deed_of_corporate_guarantee_applicable(true_or_false)", "doc_undertaking_applicable(true_or_false)",
-    "borrower_name", "borrower_constitution", "borrower_cin", "borrower_pan", "borrower_registered_address", "director_name", "director_address",
-    "facility_amount", "facility_amount_in_words", "interest_rate", "tenor", "cure_period", "default_charges",
-    "maximum_disbursement", "validity", "platform_service_fee", "transaction_fee", "minimum_utilisation", "pari_pasu_applicable(true_or_false)",
-    "Pari_pasu_charge", "fldg_applicable(true_or_false)", "conditions_precedent", "conditions_subsequent", "finance_documents", "end_clients", "security"
+    "doc_deed_of_hypothecation_applicable(true_or_false)", "doc_cover_letter_applicable(true_or_false)",
+    "doc_deed_of_personal_guarantee_applicable(true_or_false)", "doc_deed_of_corporate_guarantee_applicable(true_or_false)",
+    "borrower_name", "borrower_constitution", "borrower_cin", "borrower_pan",
+    "borrower_registered_address", "director_name", "director_address", "facility_amount",
+    "facility_amount_in_words", "interest_rate", "tenor", "cure_period", "default_charges",
+    "maximum_disbursement", "validity", "platform_service_fee", "transaction_fee",
+    "minimum_utilisation", "pari_pasu_applicable(true_or_false)", "Pari_pasu_charge",
+    "fldg_applicable(true_or_false)", "conditions_precedent", "conditions_subsequent",
+    "finance_documents", "end_clients", "security"
 ]
 
+# ---------- Health Check Utilities ----------
+def check_llm_health() -> None:
+    try:
+        together.Complete.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            prompt="ping",
+            max_tokens=1,
+            temperature=0.0
+        )
+    except Exception as e:
+        raise RuntimeError(f"LLM API is not reachable (health check failed): {e}")
+
+# ---------- Network Retry Utility ----------
+def call_with_retry(fn, retries=3, base_delay=2):
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            print(f"Attempt {attempt+1} failed: {e}")
+            if attempt == retries - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+
+# ---------- Prompt & Token Utilities ----------
+def safe_trim(text: str, max_tokens: int = 6000):
+    enc = tiktoken.get_encoding("cl100k_base")
+    tokens = enc.encode(text)
+    return enc.decode(tokens[:max_tokens])
+
 def build_prompt(text: str) -> str:
-    schema_fields = "\n".join(f"- {field}" for field in parameter_fields)
+    formatted_fields = "\n".join(
+        f"- {f.replace('(true_or_false)', '')} (return 'true' or 'false')" if "(true_or_false)" in f else f"- {f}"
+        for f in parameter_fields
+    )
     return f"""You are an expert assistant extracting structured data from loan sanction documents.
 
 Below is the text extracted from a PDF credit appraisal note. Extract values ONLY for the fields listed in the schema.
-If not identifiable, return \"Null\".
-
-Return the output as a list of JSON objects in the format: 
-[{{\"Field\": \"<field_name>\", \"Value\": \"<value>\"}}]
+If not identifiable, return "Null".
+If a field ends with (true_or_false), only return "true" or "false" as lowercase strings.
+Return the output as a list of JSON objects in the format:
+[{{"Field": "<field_name>", "Value": "<value>"}}]
 
 ### Document Text:
 {text}
 
 ### Schema Fields:
-{schema_fields}
+{formatted_fields}
 
 ### Output JSON:
 """
 
 def call_together_llm(prompt: str) -> str:
-    import tiktoken
-    encoding = tiktoken.get_encoding("cl100k_base")
-    input_tokens = len(encoding.encode(prompt))
-    max_tokens = max(256, 8192 - input_tokens)
-
-    try:
+    def make_request():
+        encoding = tiktoken.get_encoding("cl100k_base")
+        input_tokens = len(encoding.encode(prompt))
+        max_tokens = max(256, 8192 - input_tokens)
         response = together.Complete.create(
             model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
             prompt=prompt,
@@ -102,18 +126,21 @@ def call_together_llm(prompt: str) -> str:
             temperature=0.2,
             stop=["###"]
         )
+        raw_text = response["choices"][0]["text"].strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[len("```json"):].strip()
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3].strip()
+        return raw_text
 
-        if "choices" in response and len(response["choices"]) > 0:
-            raw_text = response["choices"][0]["text"].strip()
-            if raw_text.startswith("```json"):
-                raw_text = raw_text[len("```json"):].strip()
-            if raw_text.endswith("```"):
-                raw_text = raw_text[:-3].strip()
-            return raw_text
-        return "[]"
-
+    try:
+        return call_with_retry(make_request)
     except Exception as e:
-        return json.dumps([{"Field": "exception", "Value": str(e)}])
+        return json.dumps([{
+            "Field": "exception",
+            "ErrorType": e.__class__.__name__,
+            "Message": str(e)
+        }])
 
 def find_page_and_excerpt(value: str, pages: list) -> tuple:
     for i, page_text in enumerate(pages):
@@ -124,44 +151,33 @@ def find_page_and_excerpt(value: str, pages: list) -> tuple:
                 return i + 1, excerpt
     return None, None
 
-def extract_fields_from_pdf_llm(pdf_path: str, source_name: str) -> str:
-    with pdfplumber.open(pdf_path) as pdf:
-        pages_text = [page.extract_text() or "" for page in pdf.pages]
-        full_text = "\n".join(pages_text)
+def get_applicability_booleans(text: str, security_text: str) -> dict:
+    text_lower = text.lower()
+    sec_lower = security_text.lower()
+    return {
+        "doc_deed_of_hypothecation_applicable": "true" if "hypothecation" in text_lower else "false",
+        "doc_cover_letter_applicable": "true" if "cheque" in sec_lower else "false",
+        "doc_deed_of_personal_guarantee_applicable": "true" if "personal guarantee" in sec_lower or "pg" in sec_lower else "false",
+        "doc_deed_of_corporate_guarantee_applicable": "true" if "corporate guarantee" in sec_lower or "cg" in sec_lower else "false",
+    }
 
-    trimmed_text = full_text[:12000]
-    prompt = build_prompt(trimmed_text)
-    raw_response = call_together_llm(prompt)
-
+# ---------- Health Route ----------
+@app.get("/health")
+def health_check():
     try:
-        json_blocks = re.findall(r"\[\s*{.*?}\s*\]", raw_response, flags=re.DOTALL)
-        merged_items = []
-        for block in json_blocks:
-            try:
-                parsed = json.loads(block)
-                for item in parsed:
-                    val = item.get("Value", "")
-                    page_num, excerpt = find_page_and_excerpt(val, pages_text)
-                    item["SourceDocument"] = source_name
-                    item["PageNumber"] = page_num if page_num else "Unknown"
-                    item["Excerpt"] = excerpt if excerpt else "N/A"
-                merged_items.extend(parsed)
-            except json.JSONDecodeError:
-                continue
-        return json.dumps(merged_items, indent=2)
-
+        check_llm_health()
+        return {"status": "ok", "llm_api": True}
     except Exception as e:
-        return json.dumps([{
-            "Field": "error",
-            "Value": f"LLM returned malformed JSON: {str(e)}",
-            "SourceDocument": source_name
-        }], indent=2)
+        return {"status": "unhealthy", "llm_api": False, "error": str(e)}
 
+# ---------- Main Endpoint ----------
 @app.post("/extract-fields")
 async def extract_fields(
     files: List[UploadFile] = File(...),
     priority: Optional[str] = Form(None)
 ):
+    check_llm_health()
+
     def get_priority_index(filename):
         return 0 if filename == priority else 1
 
@@ -172,8 +188,45 @@ async def extract_fields(
             tmp.write(file.file.read())
             tmp_path = tmp.name
 
-        result_str = extract_fields_from_pdf_llm(tmp_path, source_name=file.filename)
-        result_items = json.loads(result_str)
+        with pdfplumber.open(tmp_path) as pdf:
+            pages_text = [page.extract_text() or "" for page in pdf.pages]
+            full_text = "\n".join(pages_text)
+
+        prompt = build_prompt(safe_trim(full_text))
+        raw_response = call_together_llm(prompt)
+
+        try:
+            result_items = json.loads(raw_response)
+            if not isinstance(result_items, list):
+                raise ValueError("Top-level JSON is not a list")
+        except:
+            result_items = []
+            for block in re.findall(r"\[\s*{.*?}\s*\]", raw_response, flags=re.DOTALL):
+                try:
+                    result_items.extend(json.loads(block))
+                except:
+                    continue
+
+        for item in result_items:
+            val = item.get("Value", "")
+            page_num, excerpt = find_page_and_excerpt(val, pages_text)
+            item.update({
+                "SourceDocument": file.filename,
+                "PageNumber": page_num or "Unknown",
+                "Excerpt": excerpt or "N/A",
+                "FieldPresent": val.lower() != "null" and val != ""
+            })
+
+        security_val = next((i.get("Value", "") for i in result_items if i.get("Field") == "security"), "")
+        for key, val in get_applicability_booleans(full_text, security_val).items():
+            result_items.append({
+                "Field": key,
+                "Value": val,
+                "SourceDocument": file.filename,
+                "PageNumber": "Auto",
+                "Excerpt": "Derived from text analysis.",
+                "FieldPresent": True
+            })
 
         for item in result_items:
             key = item["Field"]
@@ -182,17 +235,14 @@ async def extract_fields(
                 "SourceDocument": item["SourceDocument"],
                 "PageNumber": item["PageNumber"],
                 "Excerpt": item["Excerpt"],
-                "Priority": get_priority_index(item["SourceDocument"])
+                "Priority": get_priority_index(item["SourceDocument"]),
+                "FieldPresent": item["FieldPresent"]
             }
 
             if key not in field_map:
                 field_map[key] = {
                     "Field": key,
-                    "Value": item["Value"],
-                    "SourceDocument": item["SourceDocument"],
-                    "PageNumber": item["PageNumber"],
-                    "Excerpt": item["Excerpt"],
-                    "Priority": new_entry["Priority"],
+                    **new_entry,
                     "AlternateValues": [],
                     "Conflicting": False
                 }
@@ -202,19 +252,10 @@ async def extract_fields(
                     continue
                 if new_entry["Priority"] < existing["Priority"]:
                     existing["AlternateValues"].append({
-                        "Value": existing["Value"],
-                        "SourceDocument": existing["SourceDocument"],
-                        "PageNumber": existing["PageNumber"],
-                        "Excerpt": existing["Excerpt"]
+                        k: existing[k] for k in ["Value", "SourceDocument", "PageNumber", "Excerpt"]
                     })
-                    existing.update({
-                        "Value": item["Value"],
-                        "SourceDocument": item["SourceDocument"],
-                        "PageNumber": item["PageNumber"],
-                        "Excerpt": item["Excerpt"],
-                        "Priority": new_entry["Priority"],
-                        "Conflicting": True
-                    })
+                    existing.update(new_entry)
+                    existing["Conflicting"] = True
                 else:
                     existing["AlternateValues"].append(new_entry)
                     existing["Conflicting"] = True
